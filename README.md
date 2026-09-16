@@ -1,6 +1,6 @@
 # apaleo IBE Demo
 
-https://ibe-demo-purk.onrender.com/
+Upstream demo: https://ibe-demo-purk.onrender.com/
 
 A minimal demo Internet Booking Engine (IBE) built with:
 
@@ -17,6 +17,8 @@ This project is intentionally simple. It is meant to act as a **workbook / refer
 4. Enter guest details
 5. Authorize a payment with Adyen
 6. Use the Adyen PSP reference to create a booking in apaleo
+
+Checkout API calls from the backend default to apaleo's **Adyen authorization gateway** (`https://adyen-gateway.apaleo.com/api/checkout`) when `ADYEN_GATEWAY_API_KEY` is set. The browser Drop-in still talks to Adyen Checkoutshopper directly with the public `clientKey`.
 
 ---
 
@@ -38,6 +40,14 @@ This demo focuses on the base technical flow behind a booking engine.
 - Receive a **PSP reference**
 - Use that PSP reference as `transactionReference` in the apaleo booking request
 
+Backend Checkout calls (when `ADYEN_CHECKOUT_MODE=gateway` or an integrator key is set):
+
+- `POST /api/checkout/{version}/paymentMethods`
+- `POST /api/checkout/{version}/payments`
+- `POST /api/checkout/{version}/payments/details`
+
+authenticated with `x-API-key: adyk_test_…`. Set `ADYEN_CHECKOUT_MODE=direct` to call Adyen Checkout with a real Adyen API key instead (rollback / comparison).
+
 ### apaleo Pay / Adyen metadata flow
 The Adyen payment request includes `additionalData` such as:
 
@@ -47,6 +57,42 @@ The Adyen payment request includes `additionalData` such as:
 - `subMerchantID`
 
 This allows apaleo Pay to recognize the payment context correctly.
+
+---
+
+## Run locally
+
+```bash
+cp .env.example backend/.env
+# fill in values — never commit backend/.env
+cd backend
+npm install
+npm test
+npm start
+```
+
+Open `http://localhost:3000`. `/api/health` reports `checkoutMode`.
+
+### Environment
+
+Copy `.env.example`. Gateway mode needs `ADYEN_GATEWAY_API_KEY` (`adyk_test_…` issued from the gateway config API) and the public `ADYEN_CLIENT_KEY`. Do not put a real Adyen API key in gateway mode.
+
+- **Managed / legacy credential:** set `ADYEN_MERCHANT_ACCOUNT`, leave `ADYEN_STORE` empty.
+- **Balance Platform credential:** set `ADYEN_STORE` to the assigned store code.
+
+---
+
+## Deploy on Render
+
+New Web Service from this repo:
+
+- Root directory: empty (not `backend/`)
+- Build: `npm install --prefix backend`
+- Start: `npm start --prefix backend`
+- Health check: `/api/health`
+- Region: Frankfurt
+
+After the first `https://<service>.onrender.com` URL exists, add that origin to the Adyen client key Allowed Origins list.
 
 ---
 
@@ -63,3 +109,4 @@ frontend/
   index.html
   script.js
   style.css
+```

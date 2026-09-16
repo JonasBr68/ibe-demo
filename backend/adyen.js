@@ -1,12 +1,55 @@
+const crypto = require('crypto');
+const axios = require('axios');
 const { Client, CheckoutAPI } = require('@adyen/api-library');
 
+const DEFAULT_GATEWAY_BASE_URL = 'https://adyen-gateway.apaleo.com/api/checkout';
+const DEFAULT_CHECKOUT_VERSION = 'v71';
+
 /**
- * Creates a Checkout API client for Adyen.
+ * Direct talks to Adyen Checkout with a real Adyen API key.
+ * Gateway talks to apaleo's authorization gateway with an integrator key
+ * (`adyk_test_…` / `adyk_live_…`). Drop-in in the browser is unchanged.
  *
- * This project uses the Adyen test environment by default.
- * Switch to LIVE only when the environment variable explicitly says so.
+ * Default: gateway when ADYEN_GATEWAY_API_KEY is set, otherwise direct.
+ * Override with ADYEN_CHECKOUT_MODE=gateway|direct.
  */
-function createCheckoutClient() {
+function resolveCheckoutMode() {
+  const explicit = String(process.env.ADYEN_CHECKOUT_MODE || '').toLowerCase();
+  if (explicit === 'direct' || explicit === 'gateway') {
+    return explicit;
+  }
+
+  return process.env.ADYEN_GATEWAY_API_KEY ? 'gateway' : 'direct';
+}
+
+function gatewayCheckoutUrl() {
+  const base = (
+    process.env.ADYEN_GATEWAY_BASE_URL || DEFAULT_GATEWAY_BASE_URL
+  ).replace(/\/$/, '');
+  const version = process.env.ADYEN_CHECKOUT_VERSION || DEFAULT_CHECKOUT_VERSION;
+  return `${base}/${version}`;
+}
+
+/**
+ * Native BP credentials authorize Adyen's `store` field.
+ * Managed / legacy credentials authorize `merchantAccount` and pass it through.
+ * Send both only when the gateway credential is set up that way.
+ */
+function merchantContext() {
+  const body = {};
+
+  if (process.env.ADYEN_STORE) {
+    body.store = process.env.ADYEN_STORE;
+  }
+
+  if (process.env.ADYEN_MERCHANT_ACCOUNT) {
+    body.merchantAccount = process.env.ADYEN_MERCHANT_ACCOUNT;
+  }
+
+  return body;
+}
+
+function createDirectCheckoutClient() {
   const environment =
     String(process.env.ADYEN_ENVIRONMENT || 'TEST').toUpperCase() === 'LIVE'
       ? 'LIVE'
@@ -20,12 +63,21 @@ function createCheckoutClient() {
   return new CheckoutAPI(client);
 }
 
-/**
- * Converts a YYYY-MM-DD string into a real Date object.
- *
- * Adyen's SDK expects deliveryDate as a Date, not as a plain string.
- * Example input: "2026-03-15"
- */
+function createGatewayClient() {
+  const apiKey = process.env.ADYEN_GATEWAY_API_KEY;
+  if (!apiKey) {
+    throw new Error('ADYEN_GATEWAY_API_KEY is required when using gateway checkout');
+  }
+
+  return axios.create({
+    baseURL: gatewayCheckoutUrl(),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-API-key': apiKey,
+    },
+  });
+}
+
 function parseDeliveryDate(deliveryDate) {
   if (!deliveryDate) {
     return undefined;
@@ -34,42 +86,19 @@ function parseDeliveryDate(deliveryDate) {
   return new Date(`${deliveryDate}T00:00:00.000Z`);
 }
 
-/**
- * Loads the payment methods available for the current checkout context.
- *
- * The frontend uses this response to render Adyen Drop-in.
- */
-async function getPaymentMethods({
-  amount,
-  countryCode = 'DE',
-  shopperLocale = 'en-US',
-}) {
-  const checkout = createCheckoutClient();
-
-  return checkout.PaymentsApi.paymentMethods({
-    merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
-    countryCode,
-    shopperLocale,
-    amount,
-    channel: 'Web',
-  });
+function apaleoPayAdditionalData(propertyId) {
+  return {
+    'metadata.flowType': 'CaptureOnly',
+    'metadata.accountId': process.env.APALEO_ACCOUNT_ID,
+    'metadata.propertyId': propertyId,
+    subMerchantID: process.env.APALEO_SUBMERCHANT_ID,
+  };
 }
 
-/**
- * Creates an Adyen payment.
- *
- * Important for apaleo Pay:
- * - metadata.flowType must be CaptureOnly
- * - metadata.accountId identifies the apaleo account
- * - metadata.propertyId identifies the apaleo property
- * - subMerchantID identifies the connected merchant setup
- *
- * The PSP reference returned by this call is later used as
- * transactionReference when creating the apaleo booking.
- */
-async function makePayment({
+function buildPaymentPayload({
   amount,
   paymentMethod,
+  browserInfo,
   reference,
   returnUrl,
   shopperEmail,
@@ -77,10 +106,8 @@ async function makePayment({
   propertyId,
   deliveryDate,
 }) {
-  const checkout = createCheckoutClient();
-
-  const adyenPayload = {
-    merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
+  const payload = {
+    ...merchantContext(),
     amount,
     reference,
     paymentMethod,
@@ -91,55 +118,97 @@ async function makePayment({
     deliveryDate: parseDeliveryDate(deliveryDate),
     shopperInteraction: 'Ecommerce',
     recurringProcessingModel: 'UnscheduledCardOnFile',
-    additionalData: {
-      'metadata.flowType': 'CaptureOnly',
-      'metadata.accountId': process.env.APALEO_ACCOUNT_ID,
-      'metadata.propertyId': propertyId,
-      subMerchantID: process.env.APALEO_SUBMERCHANT_ID,
-    },
+    additionalData: apaleoPayAdditionalData(propertyId),
   };
 
-const response = await checkout.PaymentsApi.payments(adyenPayload);
+  if (browserInfo) {
+    payload.browserInfo = browserInfo;
+  }
 
-  const debugPayload = {
-    merchantAccount: adyenPayload.merchantAccount,
-    amount: adyenPayload.amount,
-    reference: adyenPayload.reference,
-    returnUrl: adyenPayload.returnUrl,
-    shopperEmail: adyenPayload.shopperEmail,
-    shopperReference: adyenPayload.shopperReference,
-    channel: adyenPayload.channel,
+  return payload;
+}
+
+function debugPaymentPayload(payload, paymentMethod, deliveryDate) {
+  return {
+    merchantAccount: payload.merchantAccount,
+    store: payload.store,
+    amount: payload.amount,
+    reference: payload.reference,
+    returnUrl: payload.returnUrl,
+    shopperEmail: payload.shopperEmail,
+    shopperReference: payload.shopperReference,
     deliveryDate: deliveryDate || null,
-    shopperInteraction: adyenPayload.shopperInteraction,
-    storePaymentMethod: adyenPayload.storePaymentMethod,
-    recurringProcessingModel: adyenPayload.recurringProcessingModel,
-    additionalData: adyenPayload.additionalData,
-
+    shopperInteraction: payload.shopperInteraction,
+    storePaymentMethod: payload.storePaymentMethod,
+    recurringProcessingModel: payload.recurringProcessingModel,
+    additionalData: payload.additionalData,
     paymentMethod: {
       type: paymentMethod?.type || null,
       brand: paymentMethod?.brand || null,
     },
   };
+}
+
+async function postGateway(path, body, extraHeaders = {}) {
+  const client = createGatewayClient();
+  const response = await client.post(path, body, { headers: extraHeaders });
+  return response.data;
+}
+
+async function getPaymentMethods({
+  amount,
+  countryCode = 'DE',
+  shopperLocale = 'en-US',
+}) {
+  const request = {
+    ...merchantContext(),
+    countryCode,
+    shopperLocale,
+    amount,
+    channel: 'Web',
+  };
+
+  if (resolveCheckoutMode() === 'gateway') {
+    return postGateway('/paymentMethods', request);
+  }
+
+  return createDirectCheckoutClient().PaymentsApi.paymentMethods(request);
+}
+
+async function makePayment(input) {
+  const payload = buildPaymentPayload(input);
+
+  let response;
+  if (resolveCheckoutMode() === 'gateway') {
+    response = await postGateway('/payments', payload, {
+      'Idempotency-Key': crypto.randomUUID(),
+    });
+  } else {
+    response = await createDirectCheckoutClient().PaymentsApi.payments(payload);
+  }
 
   return {
     paymentResponse: response,
-    paymentPayload: debugPayload,
+    paymentPayload: debugPaymentPayload(payload, input.paymentMethod, input.deliveryDate),
   };
 }
 
-/**
- * Finalizes payments that require an extra step,
- * for example 3DS redirect / challenge flows.
- */
 async function submitAdditionalDetails(details) {
-  const checkout = createCheckoutClient();
+  const request = { details };
 
-  return checkout.PaymentsApi.paymentsDetails({
-    details,
-  });
+  if (resolveCheckoutMode() === 'gateway') {
+    return postGateway('/payments/details', request);
+  }
+
+  return createDirectCheckoutClient().PaymentsApi.paymentsDetails(request);
 }
 
 module.exports = {
+  DEFAULT_GATEWAY_BASE_URL,
+  DEFAULT_CHECKOUT_VERSION,
+  resolveCheckoutMode,
+  gatewayCheckoutUrl,
+  merchantContext,
   getPaymentMethods,
   makePayment,
   submitAdditionalDetails,
