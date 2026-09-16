@@ -49,10 +49,12 @@ function getErrorDetails(error) {
  * Sends a consistent JSON error response and logs the original error.
  */
 function sendErrorResponse(res, label, error, statusCode = 500) {
+  const status = error.response?.status || statusCode;
+
   console.error(`${label}:`);
   console.error(getErrorDetails(error));
 
-  res.status(statusCode).send({
+  res.status(status).send({
     error: label,
     details: getErrorDetails(error),
   });
@@ -66,7 +68,10 @@ function sendErrorResponse(res, label, error, statusCode = 500) {
  * Simple health endpoint for local testing and deployment checks.
  */
 app.get('/api/health', (req, res) => {
-  res.send({ ok: true });
+  res.send({
+    ok: true,
+    checkoutMode: adyen.resolveCheckoutMode(),
+  });
 });
 
 /**
@@ -256,13 +261,7 @@ app.post('/api/payments', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Payment failed:');
-    console.error(error.response?.body || error.message);
-
-    res.status(500).send({
-      error: 'Payment failed',
-      details: error.response?.body || error.message,
-    });
+    sendErrorResponse(res, 'Payment failed', error);
   }
 });
 

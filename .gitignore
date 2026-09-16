@@ -2,7 +2,9 @@
 backend/node_modules/
 
 # Ignore environment variables
-backend/.env.DS_Store
-.DS_Store
 backend/.env
 .env
+
+# macOS
+.DS_Store
+backend/.DS_Store
