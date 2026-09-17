@@ -18,7 +18,7 @@ This project is intentionally simple. It is meant to act as a **workbook / refer
 5. Authorize a payment with Adyen
 6. Use the Adyen PSP reference to create a booking in apaleo
 
-Checkout API calls from the backend default to apaleo's **Adyen authorization gateway** (`https://adyen-gateway.apaleo.com/api/checkout`) when `ADYEN_GATEWAY_API_KEY` is set. The browser Drop-in still talks to Adyen Checkoutshopper directly with the public `clientKey`.
+Backend Checkout HTTP (`/v71/paymentMethods`, `/payments`, `/payments/details`) uses the Adyen Node SDK. Leave `ADYEN_CHECKOUT_ORIGIN` empty to hit Adyen. Set it to `https://adyen-gateway.apaleo.com` and put an `adyk_…` key in `ADYEN_API_KEY` to hit the gateway. Drop-in still talks to `checkoutshopper-*.adyen.com` with the public `clientKey`.
 
 ---
 
@@ -40,13 +40,7 @@ This demo focuses on the base technical flow behind a booking engine.
 - Receive a **PSP reference**
 - Use that PSP reference as `transactionReference` in the apaleo booking request
 
-Backend Checkout calls (when `ADYEN_CHECKOUT_MODE=gateway` or an integrator key is set):
-
-- `POST /api/checkout/{version}/paymentMethods`
-- `POST /api/checkout/{version}/payments`
-- `POST /api/checkout/{version}/payments/details`
-
-authenticated with `x-API-key: adyk_test_…`. Set `ADYEN_CHECKOUT_MODE=direct` to call Adyen Checkout with a real Adyen API key instead (rollback / comparison).
+Point the SDK at Adyen or the gateway with two env vars. The SDK keeps Adyen's path (`/v71/…` on TEST, `/checkout/v71/…` on LIVE); gateway mode only rewrites the origin.
 
 ### apaleo Pay / Adyen metadata flow
 The Adyen payment request includes `additionalData` such as:
@@ -71,11 +65,16 @@ npm test
 npm start
 ```
 
-Open `http://localhost:3000`. `/api/health` reports `checkoutMode`.
+Open `http://localhost:3000`. `/api/health` reports `checkoutOrigin` (`null` means Adyen).
 
 ### Environment
 
-Copy `.env.example`. Gateway mode needs `ADYEN_GATEWAY_API_KEY` (`adyk_test_…` issued from the gateway config API) and the public `ADYEN_CLIENT_KEY`. Do not put a real Adyen API key in gateway mode.
+| Goal | `ADYEN_API_KEY` | `ADYEN_CHECKOUT_ORIGIN` |
+|---|---|---|
+| Adyen Checkout | real Adyen key (`AQE…`) | empty |
+| Gateway | `adyk_test_…` / `adyk_live_…` | `https://adyen-gateway.apaleo.com` |
+
+Do not put a path on the origin (`/api/checkout` is not a Checkout path). Drop-in still needs `ADYEN_CLIENT_KEY`.
 
 - **Managed / legacy credential:** set `ADYEN_MERCHANT_ACCOUNT`, leave `ADYEN_STORE` empty.
 - **Balance Platform credential:** set `ADYEN_STORE` to the assigned store code.
@@ -93,6 +92,8 @@ New Web Service from this repo:
 - Region: Frankfurt
 
 After the first `https://<service>.onrender.com` URL exists, add that origin to the Adyen client key Allowed Origins list.
+
+To use the gateway on Render: `ADYEN_API_KEY=adyk_test_…` and `ADYEN_CHECKOUT_ORIGIN=https://adyen-gateway.apaleo.com`. Remove `ADYEN_GATEWAY_API_KEY`, `ADYEN_GATEWAY_BASE_URL`, and `ADYEN_CHECKOUT_MODE` if they are still set from the earlier dual-client setup.
 
 ---
 
