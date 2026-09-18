@@ -8,3 +8,4 @@ backend/.env
 # macOS
 .DS_Store
 backend/.DS_Store
+/.vs

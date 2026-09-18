@@ -1,33 +1,78 @@
 const crypto = require('crypto');
-const axios = require('axios');
-const { Client, CheckoutAPI } = require('@adyen/api-library');
+const {
+  Client,
+  CheckoutAPI,
+  HttpURLConnectionClient,
+} = require('@adyen/api-library');
 
-const DEFAULT_GATEWAY_BASE_URL = 'https://adyen-gateway.apaleo.com/api/checkout';
-const DEFAULT_CHECKOUT_VERSION = 'v71';
+const DEFAULT_GATEWAY_ORIGIN = 'https://adyen-gateway.apaleo.com';
 
 /**
- * Direct talks to Adyen Checkout with a real Adyen API key.
- * Gateway talks to apaleo's authorization gateway with an integrator key
- * (`adyk_test_…` / `adyk_live_…`). Drop-in in the browser is unchanged.
+ * Checkout HTTP (this file) can target Adyen or the apaleo gateway.
+ * Drop-in in the browser still talks to checkoutshopper-*.adyen.com.
  *
- * Default: gateway when ADYEN_GATEWAY_API_KEY is set, otherwise direct.
- * Override with ADYEN_CHECKOUT_MODE=gateway|direct.
+ * Leave ADYEN_CHECKOUT_ORIGIN empty to call Adyen.
+ * Set it to https://adyen-gateway.apaleo.com (no trailing slash, no path)
+ * and put an adyk_… key in ADYEN_API_KEY to call the gateway.
+ *
+ * The Node SDK hardcodes https://checkout-test.adyen.com/v71. There is no
+ * base-URL argument, so gateway mode only rewrites the origin and keeps the path.
  */
-function resolveCheckoutMode() {
-  const explicit = String(process.env.ADYEN_CHECKOUT_MODE || '').toLowerCase();
-  if (explicit === 'direct' || explicit === 'gateway') {
-    return explicit;
+function resolveCheckoutOrigin() {
+  const origin = process.env.ADYEN_CHECKOUT_ORIGIN;
+  if (!origin) {
+    return undefined;
   }
 
-  return process.env.ADYEN_GATEWAY_API_KEY ? 'gateway' : 'direct';
+  return origin.replace(/\/$/, '');
 }
 
-function gatewayCheckoutUrl() {
-  const base = (
-    process.env.ADYEN_GATEWAY_BASE_URL || DEFAULT_GATEWAY_BASE_URL
-  ).replace(/\/$/, '');
-  const version = process.env.ADYEN_CHECKOUT_VERSION || DEFAULT_CHECKOUT_VERSION;
-  return `${base}/${version}`;
+function rewriteCheckoutOrigin(endpoint, checkoutOrigin) {
+  if (!checkoutOrigin) {
+    return endpoint;
+  }
+
+  const url = new URL(endpoint);
+  const origin = new URL(checkoutOrigin);
+  url.protocol = origin.protocol;
+  url.host = origin.host;
+  return url.toString();
+}
+
+function createHttpClient(checkoutOrigin) {
+  const httpClient = new HttpURLConnectionClient();
+  if (!checkoutOrigin) {
+    return httpClient;
+  }
+
+  const originalRequest = httpClient.request.bind(httpClient);
+  httpClient.request = (endpoint, json, config, isApiRequired, requestOptions) =>
+    originalRequest(
+      rewriteCheckoutOrigin(endpoint, checkoutOrigin),
+      json,
+      config,
+      isApiRequired,
+      requestOptions,
+    );
+
+  return httpClient;
+}
+
+function createCheckoutClient() {
+  const environment =
+    String(process.env.ADYEN_ENVIRONMENT || 'TEST').toUpperCase() === 'LIVE'
+      ? 'LIVE'
+      : 'TEST';
+
+  const client = new Client(
+    {
+      apiKey: process.env.ADYEN_API_KEY,
+      environment,
+    },
+    createHttpClient(resolveCheckoutOrigin()),
+  );
+
+  return new CheckoutAPI(client);
 }
 
 /**
@@ -47,35 +92,6 @@ function merchantContext() {
   }
 
   return body;
-}
-
-function createDirectCheckoutClient() {
-  const environment =
-    String(process.env.ADYEN_ENVIRONMENT || 'TEST').toUpperCase() === 'LIVE'
-      ? 'LIVE'
-      : 'TEST';
-
-  const client = new Client({
-    apiKey: process.env.ADYEN_API_KEY,
-    environment,
-  });
-
-  return new CheckoutAPI(client);
-}
-
-function createGatewayClient() {
-  const apiKey = process.env.ADYEN_GATEWAY_API_KEY;
-  if (!apiKey) {
-    throw new Error('ADYEN_GATEWAY_API_KEY is required when using gateway checkout');
-  }
-
-  return axios.create({
-    baseURL: gatewayCheckoutUrl(),
-    headers: {
-      'Content-Type': 'application/json',
-      'x-API-key': apiKey,
-    },
-  });
 }
 
 function parseDeliveryDate(deliveryDate) {
@@ -149,65 +165,45 @@ function debugPaymentPayload(payload, paymentMethod, deliveryDate) {
   };
 }
 
-async function postGateway(path, body, extraHeaders = {}) {
-  const client = createGatewayClient();
-  const response = await client.post(path, body, { headers: extraHeaders });
-  return response.data;
-}
-
 async function getPaymentMethods({
   amount,
   countryCode = 'DE',
   shopperLocale = 'en-US',
 }) {
-  const request = {
+  return createCheckoutClient().PaymentsApi.paymentMethods({
     ...merchantContext(),
     countryCode,
     shopperLocale,
     amount,
     channel: 'Web',
-  };
-
-  if (resolveCheckoutMode() === 'gateway') {
-    return postGateway('/paymentMethods', request);
-  }
-
-  return createDirectCheckoutClient().PaymentsApi.paymentMethods(request);
+  });
 }
 
 async function makePayment(input) {
   const payload = buildPaymentPayload(input);
-
-  let response;
-  if (resolveCheckoutMode() === 'gateway') {
-    response = await postGateway('/payments', payload, {
-      'Idempotency-Key': crypto.randomUUID(),
-    });
-  } else {
-    response = await createDirectCheckoutClient().PaymentsApi.payments(payload);
-  }
+  const paymentResponse = await createCheckoutClient().PaymentsApi.payments(
+    payload,
+    { idempotencyKey: crypto.randomUUID() },
+  );
 
   return {
-    paymentResponse: response,
-    paymentPayload: debugPaymentPayload(payload, input.paymentMethod, input.deliveryDate),
+    paymentResponse,
+    paymentPayload: debugPaymentPayload(
+      payload,
+      input.paymentMethod,
+      input.deliveryDate,
+    ),
   };
 }
 
 async function submitAdditionalDetails(details) {
-  const request = { details };
-
-  if (resolveCheckoutMode() === 'gateway') {
-    return postGateway('/payments/details', request);
-  }
-
-  return createDirectCheckoutClient().PaymentsApi.paymentsDetails(request);
+  return createCheckoutClient().PaymentsApi.paymentsDetails({ details });
 }
 
 module.exports = {
-  DEFAULT_GATEWAY_BASE_URL,
-  DEFAULT_CHECKOUT_VERSION,
-  resolveCheckoutMode,
-  gatewayCheckoutUrl,
+  DEFAULT_GATEWAY_ORIGIN,
+  resolveCheckoutOrigin,
+  rewriteCheckoutOrigin,
   merchantContext,
   getPaymentMethods,
   makePayment,

@@ -70,7 +70,7 @@ function sendErrorResponse(res, label, error, statusCode = 500) {
 app.get('/api/health', (req, res) => {
   res.send({
     ok: true,
-    checkoutMode: adyen.resolveCheckoutMode(),
+    checkoutOrigin: adyen.resolveCheckoutOrigin() || null,
   });
 });
 

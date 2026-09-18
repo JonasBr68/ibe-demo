@@ -2,11 +2,10 @@ const { test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  resolveCheckoutMode,
-  gatewayCheckoutUrl,
+  resolveCheckoutOrigin,
+  rewriteCheckoutOrigin,
   merchantContext,
-  DEFAULT_GATEWAY_BASE_URL,
-  DEFAULT_CHECKOUT_VERSION,
+  DEFAULT_GATEWAY_ORIGIN,
 } = require('./adyen');
 
 const originalEnv = { ...process.env };
@@ -22,45 +21,45 @@ function restoreEnv() {
 }
 
 beforeEach(() => {
-  delete process.env.ADYEN_CHECKOUT_MODE;
-  delete process.env.ADYEN_GATEWAY_API_KEY;
-  delete process.env.ADYEN_GATEWAY_BASE_URL;
-  delete process.env.ADYEN_CHECKOUT_VERSION;
+  delete process.env.ADYEN_CHECKOUT_ORIGIN;
   delete process.env.ADYEN_STORE;
   delete process.env.ADYEN_MERCHANT_ACCOUNT;
 });
 
 afterEach(restoreEnv);
 
-test('resolveCheckoutMode defaults to gateway when an integrator key is set', () => {
-  process.env.ADYEN_GATEWAY_API_KEY = 'adyk_test_example';
-  assert.equal(resolveCheckoutMode(), 'gateway');
+test('resolveCheckoutOrigin is unset when calling Adyen directly', () => {
+  assert.equal(resolveCheckoutOrigin(), undefined);
 });
 
-test('resolveCheckoutMode defaults to direct when no integrator key is set', () => {
-  assert.equal(resolveCheckoutMode(), 'direct');
+test('resolveCheckoutOrigin strips a trailing slash', () => {
+  process.env.ADYEN_CHECKOUT_ORIGIN = `${DEFAULT_GATEWAY_ORIGIN}/`;
+  assert.equal(resolveCheckoutOrigin(), DEFAULT_GATEWAY_ORIGIN);
 });
 
-test('resolveCheckoutMode honours an explicit mode override', () => {
-  process.env.ADYEN_GATEWAY_API_KEY = 'adyk_test_example';
-  process.env.ADYEN_CHECKOUT_MODE = 'direct';
-  assert.equal(resolveCheckoutMode(), 'direct');
-});
-
-test('gatewayCheckoutUrl uses production gateway and v71 by default', () => {
+test('rewriteCheckoutOrigin keeps the Adyen test path on the gateway host', () => {
   assert.equal(
-    gatewayCheckoutUrl(),
-    `${DEFAULT_GATEWAY_BASE_URL}/${DEFAULT_CHECKOUT_VERSION}`,
+    rewriteCheckoutOrigin(
+      'https://checkout-test.adyen.com/v71/payments',
+      DEFAULT_GATEWAY_ORIGIN,
+    ),
+    `${DEFAULT_GATEWAY_ORIGIN}/v71/payments`,
   );
 });
 
-test('gatewayCheckoutUrl strips a trailing slash and appends the version', () => {
-  process.env.ADYEN_GATEWAY_BASE_URL = 'https://adyen-gateway.apaleo.com/api/checkout/';
-  process.env.ADYEN_CHECKOUT_VERSION = 'v72';
+test('rewriteCheckoutOrigin keeps the Adyen live /checkout path on the gateway host', () => {
   assert.equal(
-    gatewayCheckoutUrl(),
-    'https://adyen-gateway.apaleo.com/api/checkout/v72',
+    rewriteCheckoutOrigin(
+      'https://abcde-checkout-live.adyenpayments.com/checkout/v71/payments/details',
+      DEFAULT_GATEWAY_ORIGIN,
+    ),
+    `${DEFAULT_GATEWAY_ORIGIN}/checkout/v71/payments/details`,
   );
+});
+
+test('rewriteCheckoutOrigin is a no-op without a gateway origin', () => {
+  const endpoint = 'https://checkout-test.adyen.com/v71/paymentMethods';
+  assert.equal(rewriteCheckoutOrigin(endpoint), endpoint);
 });
 
 test('merchantContext omits store and merchantAccount when unset', () => {
