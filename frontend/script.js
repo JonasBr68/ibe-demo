@@ -5,6 +5,9 @@
 const searchForm = document.getElementById('search-form');
 const offersContainer = document.getElementById('offers');
 const propertySelect = document.getElementById('property-select');
+const accountSelect = document.getElementById('account-select');
+const modeSelect = document.getElementById('mode-select');
+const gatewayLabel = document.getElementById('gateway-label');
 
 const guestSection = document.getElementById('guest-section');
 const guestForm = document.getElementById('guest-form');
@@ -17,6 +20,10 @@ const dropinContainer = document.getElementById('dropin-container');
 // -----------------------------------------------------------------------------
 // Frontend state
 // -----------------------------------------------------------------------------
+
+let accounts = [];
+let selectedAccountId = null;
+let selectedMode = null;
 
 let selectedOffer = null;
 let searchCriteria = null;
@@ -35,8 +42,106 @@ let bookingCreationInProgress = false;
 
 document.addEventListener('DOMContentLoaded', async () => {
   restoreCheckoutState();
+  await loadAccounts();
   await loadProperties();
   await handleRedirectReturnIfNeeded();
+});
+
+// -----------------------------------------------------------------------------
+// Accounts and payment mode
+// -----------------------------------------------------------------------------
+
+async function loadAccounts() {
+  try {
+    const response = await fetch('/api/accounts');
+    const json = parseJsonOrThrow(await response.text(), response.status);
+
+    if (!response.ok) {
+      throw new Error(JSON.stringify(json.details || json.error || json, null, 2));
+    }
+
+    accounts = json.accounts || [];
+  } catch (error) {
+    accountSelect.innerHTML = '<option value="">Failed to load accounts</option>';
+    offersContainer.innerHTML = `
+      <pre>Error loading accounts:
+${escapeHtml(error.message)}</pre>
+    `;
+    return;
+  }
+
+  if (!accounts.length) {
+    accountSelect.innerHTML = '<option value="">No accounts configured</option>';
+    return;
+  }
+
+  accountSelect.innerHTML = '';
+  accounts.forEach((account) => {
+    const option = document.createElement('option');
+    option.value = account.id;
+    option.textContent = account.label;
+    accountSelect.appendChild(option);
+  });
+
+  // A 3DS redirect restores the account and mode used for the original payment.
+  const restored = accounts.find((account) => account.id === selectedAccountId);
+  selectedAccountId = (restored || accounts[0]).id;
+  accountSelect.value = selectedAccountId;
+  applyAccountToControls();
+}
+
+function currentAccount() {
+  return accounts.find((account) => account.id === selectedAccountId) || null;
+}
+
+function applyAccountToControls() {
+  const account = currentAccount();
+  if (!account) {
+    return;
+  }
+
+  Array.from(modeSelect.options).forEach((option) => {
+    option.disabled = !account.modes.includes(option.value);
+  });
+
+  if (!account.modes.includes(selectedMode)) {
+    selectedMode = account.modes[0];
+  }
+
+  modeSelect.value = selectedMode;
+  modeSelect.disabled = account.modes.length < 2;
+  gatewayLabel.textContent = `Gateway: ${account.environment} (${account.gateway})`;
+}
+
+function resetCheckout() {
+  selectedOffer = null;
+  searchCriteria = null;
+  guestDetails = null;
+  latestPspReference = null;
+  latestPaymentResult = null;
+  bookingCreationInProgress = false;
+
+  offersContainer.innerHTML = 'No offers loaded yet.';
+  hideGuestStep();
+  hidePaymentStep();
+  clearCheckoutState();
+}
+
+accountSelect.addEventListener('change', async () => {
+  selectedAccountId = accountSelect.value;
+  applyAccountToControls();
+  resetCheckout();
+  await loadProperties();
+});
+
+modeSelect.addEventListener('change', () => {
+  selectedMode = modeSelect.value;
+
+  // The mode decides the credential and Checkout body, so any open payment is stale.
+  hidePaymentStep();
+  if (selectedOffer && guestDetails) {
+    saveCheckoutState();
+  }
 });
 
 // -----------------------------------------------------------------------------
@@ -49,6 +154,7 @@ searchForm.addEventListener('submit', async (event) => {
   const formData = new FormData(searchForm);
 
   searchCriteria = {
+    accountId: selectedAccountId,
     propertyId: formData.get('propertyId'),
     arrival: formData.get('arrival'),
     departure: formData.get('departure'),
@@ -110,6 +216,8 @@ async function handleRedirectReturnIfNeeded() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        accountId: selectedAccountId,
+        mode: selectedMode,
         details: { redirectResult },
       }),
     });
@@ -179,7 +287,14 @@ async function loadProperties() {
   propertySelect.innerHTML = '<option value="">Loading properties...</option>';
 
   try {
-    const response = await fetch('/api/properties');
+    if (!selectedAccountId) {
+      propertySelect.innerHTML = '<option value="">No account selected</option>';
+      return;
+    }
+
+    const response = await fetch(
+      `/api/properties?accountId=${encodeURIComponent(selectedAccountId)}`,
+    );
     const rawText = await response.text();
     const json = parseJsonOrThrow(rawText, response.status);
 
@@ -205,6 +320,11 @@ function renderProperties(properties) {
 
   propertySelect.innerHTML = '';
 
+  const preferredId = currentAccount()?.defaultPropertyId;
+  const hasPreferred = properties.some(
+    (property) => (property.id || property.code) === preferredId || property.code === preferredId,
+  );
+
   properties.forEach((property) => {
     const option = document.createElement('option');
 
@@ -215,7 +335,7 @@ function renderProperties(properties) {
     option.value = id;
     option.textContent = `${code} — ${name}`;
 
-    if (id === 'CBA' || code === 'CBA') {
+    if (hasPreferred && (id === preferredId || code === preferredId)) {
       option.selected = true;
     }
 
@@ -378,22 +498,22 @@ function renderPaymentSummary() {
  * 4. Submit encrypted payment data to backend
  */
 async function initializeAdyenDropin(amount) {
-  if (!window.AdyenWeb) {
-    throw new Error('Adyen Web SDK is not loaded');
-  }
-
-  const { AdyenCheckout, Dropin } = window.AdyenWeb;
-
-  if (!AdyenCheckout) {
-    throw new Error('AdyenCheckout is not available on window.AdyenWeb');
-  }
-
-  const configResponse = await fetch('/api/config');
+  const configResponse = await fetch(
+    `/api/config?accountId=${encodeURIComponent(selectedAccountId)}&mode=${encodeURIComponent(selectedMode)}`,
+  );
   const configText = await configResponse.text();
   const configJson = parseJsonOrThrow(configText, configResponse.status);
 
   if (!configResponse.ok) {
     throw new Error(JSON.stringify(configJson, null, 2));
+  }
+
+  await loadAdyenWebSdk(configJson.adyenEnvironment);
+
+  const { AdyenCheckout, Dropin } = window.AdyenWeb;
+
+  if (!AdyenCheckout) {
+    throw new Error('AdyenCheckout is not available on window.AdyenWeb');
   }
 
   const paymentMethodsResponse = await fetch('/api/paymentMethods', {
@@ -402,6 +522,8 @@ async function initializeAdyenDropin(amount) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
+      accountId: selectedAccountId,
+      mode: selectedMode,
       amount,
       countryCode: 'DE',
       shopperLocale: 'en-US',
@@ -438,6 +560,8 @@ async function initializeAdyenDropin(amount) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            accountId: selectedAccountId,
+            mode: selectedMode,
             amount,
             paymentMethod: state.data.paymentMethod,
             browserInfo: state.data.browserInfo,
@@ -479,6 +603,8 @@ ${escapeHtml(error.message)}</pre>
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            accountId: selectedAccountId,
+            mode: selectedMode,
             details: state.data.details,
           }),
         });
@@ -564,6 +690,8 @@ async function renderPaymentResult(result) {
  */
 function saveCheckoutState() {
   const state = {
+    selectedAccountId,
+    selectedMode,
     selectedOffer,
     searchCriteria,
     guestDetails,
@@ -593,6 +721,8 @@ function restoreCheckoutState() {
     return;
   }
 
+  selectedAccountId = savedState.selectedAccountId || null;
+  selectedMode = savedState.selectedMode || null;
   selectedOffer = savedState.selectedOffer || null;
   searchCriteria = savedState.searchCriteria || null;
   guestDetails = savedState.guestDetails || null;
@@ -621,6 +751,7 @@ Missing selectedOffer, searchCriteria, guestDetails, or latestPspReference.</pre
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        accountId: selectedAccountId,
         offer: selectedOffer,
         searchCriteria,
         guest: guestDetails,
@@ -704,6 +835,46 @@ function hidePaymentStep() {
 // -----------------------------------------------------------------------------
 // Generic helpers
 // -----------------------------------------------------------------------------
+
+const ADYEN_WEB_VERSION = '6.17.0';
+let loadedAdyenWebEnvironment = null;
+
+/**
+ * Loads Drop-in from checkoutshopper-test or checkoutshopper-live. One page can
+ * hold only one of them, so a conflicting second environment needs a reload.
+ */
+function loadAdyenWebSdk(environment) {
+  if (loadedAdyenWebEnvironment === environment && window.AdyenWeb) {
+    return Promise.resolve();
+  }
+
+  if (loadedAdyenWebEnvironment) {
+    return Promise.reject(
+      new Error(
+        `Drop-in is already loaded for "${loadedAdyenWebEnvironment}". Reload the page to use a "${environment}" account.`,
+      ),
+    );
+  }
+
+  const base = `https://checkoutshopper-${environment}.adyen.com/checkoutshopper/sdk/${ADYEN_WEB_VERSION}`;
+
+  return new Promise((resolve, reject) => {
+    const stylesheet = document.createElement('link');
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = `${base}/adyen.css`;
+    document.head.appendChild(stylesheet);
+
+    const script = document.createElement('script');
+    script.src = `${base}/adyen.js`;
+    script.crossOrigin = 'anonymous';
+    script.onload = () => {
+      loadedAdyenWebEnvironment = environment;
+      resolve();
+    };
+    script.onerror = () => reject(new Error(`Adyen Web SDK failed to load from ${base}`));
+    document.head.appendChild(script);
+  });
+}
 
 function getPrepaymentAmount(offer) {
   const amount = Number(offer.prePaymentAmount?.amount || 0);

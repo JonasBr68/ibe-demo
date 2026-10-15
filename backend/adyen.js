@@ -5,26 +5,30 @@ const {
   HttpURLConnectionClient,
 } = require('@adyen/api-library');
 
-const DEFAULT_GATEWAY_ORIGIN = 'https://adyen-gateway.apaleo.com';
+const { GATEWAY_HOSTS, ALLOWED_GATEWAYS } = require('./accounts');
+
+const DEFAULT_GATEWAY_ORIGIN = GATEWAY_HOSTS.production;
 
 /**
- * Checkout HTTP (this file) can target Adyen or the apaleo gateway.
+ * Checkout HTTP (this file) targets one of the two apaleo gateway hosts.
  * Drop-in in the browser still talks to checkoutshopper-*.adyen.com.
- *
- * Leave ADYEN_CHECKOUT_ORIGIN empty to call Adyen.
- * Set it to https://adyen-gateway.apaleo.com (no trailing slash, no path)
- * and put an adyk_… key in ADYEN_API_KEY to call the gateway.
  *
  * The Node SDK hardcodes https://checkout-test.adyen.com/v71. There is no
  * base-URL argument, so gateway mode only rewrites the origin and keeps the path.
+ *
+ * The origin always comes from a server-side account profile, never the client.
  */
-function resolveCheckoutOrigin() {
-  const origin = process.env.ADYEN_CHECKOUT_ORIGIN;
+function resolveCheckoutOrigin(origin) {
   if (!origin) {
     return undefined;
   }
 
-  return origin.replace(/\/$/, '');
+  const normalized = origin.replace(/\/+$/, '');
+  if (!ALLOWED_GATEWAYS.includes(normalized)) {
+    throw new Error(`Checkout origin "${normalized}" is not an allowed gateway host`);
+  }
+
+  return normalized;
 }
 
 function rewriteCheckoutOrigin(endpoint, checkoutOrigin) {
@@ -58,40 +62,29 @@ function createHttpClient(checkoutOrigin) {
   return httpClient;
 }
 
-function createCheckoutClient() {
-  const environment =
-    String(process.env.ADYEN_ENVIRONMENT || 'TEST').toUpperCase() === 'LIVE'
-      ? 'LIVE'
-      : 'TEST';
-
+function createCheckoutClient({ account, mode }) {
   const client = new Client(
     {
-      apiKey: process.env.ADYEN_API_KEY,
-      environment,
+      apiKey: mode.apiKey,
+      environment: mode.environment,
     },
-    createHttpClient(resolveCheckoutOrigin()),
+    createHttpClient(resolveCheckoutOrigin(account.gateway)),
   );
 
   return new CheckoutAPI(client);
 }
 
 /**
- * Native BP credentials authorize Adyen's `store` field.
- * Managed / legacy credentials authorize `merchantAccount` and pass it through.
- * Send both only when the gateway credential is set up that way.
+ * Balance credentials authorize `store`; the gateway injects the regional merchantAccount.
+ * Managed credentials authorize `merchantAccount` and the gateway forwards it as sent.
+ * The gateway treats the two as disjoint request classes, so send exactly one.
  */
-function merchantContext() {
-  const body = {};
-
-  if (process.env.ADYEN_STORE) {
-    body.store = process.env.ADYEN_STORE;
+function merchantContext(mode) {
+  if (mode.name === 'balance') {
+    return { store: mode.store };
   }
 
-  if (process.env.ADYEN_MERCHANT_ACCOUNT) {
-    body.merchantAccount = process.env.ADYEN_MERCHANT_ACCOUNT;
-  }
-
-  return body;
+  return { merchantAccount: mode.merchantAccount };
 }
 
 function parseDeliveryDate(deliveryDate) {
@@ -102,16 +95,18 @@ function parseDeliveryDate(deliveryDate) {
   return new Date(`${deliveryDate}T00:00:00.000Z`);
 }
 
-function apaleoPayAdditionalData(propertyId) {
+function apaleoPayAdditionalData(account, propertyId) {
   return {
     'metadata.flowType': 'CaptureOnly',
-    'metadata.accountId': process.env.APALEO_ACCOUNT_ID,
+    'metadata.accountId': account.apaleo.accountId,
     'metadata.propertyId': propertyId,
-    subMerchantID: process.env.APALEO_SUBMERCHANT_ID,
+    subMerchantID: account.apaleo.subMerchantId,
   };
 }
 
 function buildPaymentPayload({
+  account,
+  mode,
   amount,
   paymentMethod,
   browserInfo,
@@ -123,7 +118,7 @@ function buildPaymentPayload({
   deliveryDate,
 }) {
   const payload = {
-    ...merchantContext(),
+    ...merchantContext(mode),
     amount,
     reference,
     paymentMethod,
@@ -134,7 +129,7 @@ function buildPaymentPayload({
     deliveryDate: parseDeliveryDate(deliveryDate),
     shopperInteraction: 'Ecommerce',
     recurringProcessingModel: 'UnscheduledCardOnFile',
-    additionalData: apaleoPayAdditionalData(propertyId),
+    additionalData: apaleoPayAdditionalData(account, propertyId),
   };
 
   if (browserInfo) {
@@ -166,12 +161,14 @@ function debugPaymentPayload(payload, paymentMethod, deliveryDate) {
 }
 
 async function getPaymentMethods({
+  account,
+  mode,
   amount,
   countryCode = 'DE',
   shopperLocale = 'en-US',
 }) {
-  return createCheckoutClient().PaymentsApi.paymentMethods({
-    ...merchantContext(),
+  return createCheckoutClient({ account, mode }).PaymentsApi.paymentMethods({
+    ...merchantContext(mode),
     countryCode,
     shopperLocale,
     amount,
@@ -181,7 +178,7 @@ async function getPaymentMethods({
 
 async function makePayment(input) {
   const payload = buildPaymentPayload(input);
-  const paymentResponse = await createCheckoutClient().PaymentsApi.payments(
+  const paymentResponse = await createCheckoutClient(input).PaymentsApi.payments(
     payload,
     { idempotencyKey: crypto.randomUUID() },
   );
@@ -196,8 +193,8 @@ async function makePayment(input) {
   };
 }
 
-async function submitAdditionalDetails(details) {
-  return createCheckoutClient().PaymentsApi.paymentsDetails({ details });
+async function submitAdditionalDetails({ account, mode, details }) {
+  return createCheckoutClient({ account, mode }).PaymentsApi.paymentsDetails({ details });
 }
 
 module.exports = {
@@ -205,6 +202,7 @@ module.exports = {
   resolveCheckoutOrigin,
   rewriteCheckoutOrigin,
   merchantContext,
+  buildPaymentPayload,
   getPaymentMethods,
   makePayment,
   submitAdditionalDetails,

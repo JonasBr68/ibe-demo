@@ -5,6 +5,10 @@ const path = require('path');
 
 const apaleo = require('./apaleo');
 const adyen = require('./adyen');
+const { loadAccounts, createRegistry } = require('./accounts');
+
+// An invalid ACCOUNTS_FILE / ACCOUNTS_JSON throws here so boot fails loudly.
+const registry = createRegistry(loadAccounts());
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,7 +53,7 @@ function getErrorDetails(error) {
  * Sends a consistent JSON error response and logs the original error.
  */
 function sendErrorResponse(res, label, error, statusCode = 500) {
-  const status = error.response?.status || statusCode;
+  const status = error.status || error.response?.status || statusCode;
 
   console.error(`${label}:`);
   console.error(getErrorDetails(error));
@@ -68,27 +72,39 @@ function sendErrorResponse(res, label, error, statusCode = 500) {
  * Simple health endpoint for local testing and deployment checks.
  */
 app.get('/api/health', (req, res) => {
-  res.send({
-    ok: true,
-    checkoutOrigin: adyen.resolveCheckoutOrigin() || null,
+  const accounts = registry.publicList();
+
+  res.status(accounts.length ? 200 : 503).send({
+    ok: accounts.length > 0,
+    accounts: accounts.map(({ id, gateway, modes }) => ({ id, gateway, modes })),
   });
 });
 
 /**
- * Returns safe frontend config.
+ * Public account list for the UI selector. Contains no secrets.
+ */
+app.get('/api/accounts', (req, res) => {
+  res.send({ accounts: registry.publicList() });
+});
+
+/**
+ * Returns safe frontend config for one account and mode.
  *
  * Important:
  * - clientKey is safe for the browser
  * - API keys and client secrets must never be sent to the frontend
  */
 app.get('/api/config', (req, res) => {
-  res.send({
-    adyenClientKey: process.env.ADYEN_CLIENT_KEY,
-    adyenEnvironment:
-      String(process.env.ADYEN_ENVIRONMENT || 'TEST').toLowerCase() === 'live'
-        ? 'live'
-        : 'test',
-  });
+  try {
+    const { mode } = registry.resolve(req.query.accountId, req.query.mode);
+
+    res.send({
+      adyenClientKey: mode.clientKey,
+      adyenEnvironment: mode.environment === 'LIVE' ? 'live' : 'test',
+    });
+  } catch (error) {
+    sendErrorResponse(res, 'Loading config failed', error, 400);
+  }
 });
 
 // -----------------------------------------------------------------------------
@@ -103,7 +119,8 @@ app.get('/api/properties', async (req, res) => {
   console.log('GET /api/properties');
 
   try {
-    const properties = await apaleo.getProperties();
+    const { account } = registry.resolve(req.query.accountId);
+    const properties = await apaleo.getProperties(account);
 
     res.send({
       success: true,
@@ -122,7 +139,7 @@ app.post('/api/offers/search', async (req, res) => {
   console.log('Request body:', req.body);
 
   try {
-    const { propertyId, arrival, departure, adults } = req.body;
+    const { accountId, propertyId, arrival, departure, adults } = req.body;
 
     if (!propertyId || !arrival || !departure || !adults) {
       return res.status(400).send({
@@ -130,7 +147,10 @@ app.post('/api/offers/search', async (req, res) => {
       });
     }
 
+    const { account } = registry.resolve(accountId);
+
     const offers = await apaleo.searchOffers({
+      account,
       propertyId,
       arrival,
       departure,
@@ -163,7 +183,7 @@ app.post('/api/bookings/create', async (req, res) => {
   console.log('Request body:', JSON.stringify(req.body, null, 2));
 
   try {
-    const { offer, searchCriteria, guest, pspReference } = req.body;
+    const { accountId, offer, searchCriteria, guest, pspReference } = req.body;
 
     if (!offer || !searchCriteria || !guest || !pspReference) {
       return res.status(400).send({
@@ -171,7 +191,10 @@ app.post('/api/bookings/create', async (req, res) => {
       });
     }
 
+    const { account } = registry.resolve(accountId);
+
     const result = await apaleo.createBookingWithPaymentAccount({
+      account,
       offer,
       searchCriteria,
       guest,
@@ -204,9 +227,12 @@ app.post('/api/paymentMethods', async (req, res) => {
   console.log('Request body:', req.body);
 
   try {
-    const { amount, countryCode, shopperLocale } = req.body;
+    const { accountId, mode: modeName, amount, countryCode, shopperLocale } = req.body;
+    const { account, mode } = registry.resolve(accountId, modeName);
 
     const paymentMethods = await adyen.getPaymentMethods({
+      account,
+      mode,
       amount,
       countryCode,
       shopperLocale,
@@ -234,6 +260,8 @@ app.post('/api/payments', async (req, res) => {
 
   try {
     const {
+      accountId,
+      mode: modeName,
       amount,
       paymentMethod,
       browserInfo,
@@ -243,7 +271,11 @@ app.post('/api/payments', async (req, res) => {
       deliveryDate,
     } = req.body;
 
+    const { account, mode } = registry.resolve(accountId, modeName);
+
     const result = await adyen.makePayment({
+      account,
+      mode,
       amount,
       paymentMethod,
       browserInfo,
@@ -276,7 +308,14 @@ app.post('/api/payments/details', async (req, res) => {
   console.log('Request body:', JSON.stringify(req.body, null, 2));
 
   try {
-    const detailsResponse = await adyen.submitAdditionalDetails(req.body.details);
+    const { accountId, mode: modeName, details } = req.body;
+    const { account, mode } = registry.resolve(accountId, modeName);
+
+    const detailsResponse = await adyen.submitAdditionalDetails({
+      account,
+      mode,
+      details,
+    });
     res.send(detailsResponse);
   } catch (error) {
     sendErrorResponse(res, 'Submitting payment details failed', error);
@@ -289,4 +328,12 @@ app.post('/api/payments/details', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
+  for (const account of registry.publicList()) {
+    console.log(
+      `Account ${account.id}: gateway ${account.gateway}, modes ${account.modes.join(', ')}`,
+    );
+  }
+  if (!registry.accounts.length) {
+    console.warn('No accounts configured. Set ACCOUNTS_JSON, ACCOUNTS_FILE, or the legacy env vars.');
+  }
 });
