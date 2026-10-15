@@ -18,7 +18,9 @@ This project is intentionally simple. It is meant to act as a **workbook / refer
 5. Authorize a payment with Adyen
 6. Use the Adyen PSP reference to create a booking in apaleo
 
-Backend Checkout HTTP (`/v71/paymentMethods`, `/payments`, `/payments/details`) uses the Adyen Node SDK. Leave `ADYEN_CHECKOUT_ORIGIN` empty to hit Adyen. Set it to `https://adyen-gateway.apaleo.com` and put an `adyk_…` key in `ADYEN_API_KEY` to hit the gateway. Drop-in still talks to `checkoutshopper-*.adyen.com` with the public `clientKey`.
+Backend Checkout HTTP (`/v71/paymentMethods`, `/payments`, `/payments/details`) uses the Adyen Node SDK and always goes through an apaleo Adyen Gateway (production or staging) with an `adyk_…` key. Drop-in talks to `checkoutshopper-*.adyen.com` with the public `clientKey`.
+
+One deployment serves several apaleo accounts. The UI has an account selector and a Managed / Balance switch (see [Accounts](#accounts)).
 
 ---
 
@@ -40,7 +42,7 @@ This demo focuses on the base technical flow behind a booking engine.
 - Receive a **PSP reference**
 - Use that PSP reference as `transactionReference` in the apaleo booking request
 
-Point the SDK at Adyen or the gateway with two env vars. The SDK keeps Adyen's path (`/v71/…` on TEST, `/checkout/v71/…` on LIVE); gateway mode only rewrites the origin.
+The SDK keeps Adyen's path (`/v71/…` on TEST, `/checkout/v71/…` on LIVE); the demo only rewrites the origin to the account's gateway host.
 
 ### apaleo Pay / Adyen metadata flow
 The Adyen payment request includes `additionalData` such as:
@@ -65,42 +67,67 @@ npm test
 npm start
 ```
 
-Open `http://localhost:3000`. `/api/health` reports `checkoutOrigin` (`null` means Adyen).
+Open `http://localhost:3000`. `/api/health` lists the configured accounts, gateway hosts, and modes (HTTP 503 when none are configured).
 
-### Environment
+### Accounts
 
-| Goal | `ADYEN_API_KEY` | `ADYEN_CHECKOUT_ORIGIN` |
+Profiles load from `ACCOUNTS_FILE` (local JSON file), else `ACCOUNTS_JSON` (the same JSON in one env var), else the legacy flat `APALEO_*` / `ADYEN_*` variables as a single account. An invalid `ACCOUNTS_FILE` / `ACCOUNTS_JSON` stops the server at boot.
+
+```json
+{
+  "accounts": [
+    {
+      "id": "RRQL",
+      "label": "RRQL production",
+      "defaultPropertyId": "CBA",
+      "gateway": "https://adyen-gateway.apaleo.com",
+      "apaleo": { "clientId": "", "clientSecret": "", "accountId": "RRQL", "subMerchantId": "" },
+      "modes": {
+        "managed": { "apiKey": "adyk_test_…", "clientKey": "test_…", "environment": "TEST", "merchantAccount": "ExampleCOM" },
+        "balance": { "apiKey": "adyk_test_…", "clientKey": "test_…", "environment": "TEST", "store": "ST…" }
+      }
+    }
+  ]
+}
+```
+
+- `gateway` is `https://adyen-gateway.apaleo.com` or `https://adyen-gateway.apaleo-staging.com`. Staging is a separate deployment with its own `adyk_` keys. To use both hosts for one apaleo account, add two profiles (for example `RRQL` and `RRQL-staging`).
+- Each mode block is optional; the UI offers the modes that exist.
+- The browser sends only `accountId` and `mode`. Keys, merchant accounts, stores, and hosts stay on the server.
+- apaleo APIs (`api.apaleo.com`, `identity.apaleo.com`) are the same for every account.
+
+### Managed vs Balance
+
+The gateway ties each `adyk_` credential to one operations mode and treats the two request shapes as disjoint:
+
+| Mode | Request body | Gateway behavior |
 |---|---|---|
-| Adyen Checkout | real Adyen key (`AQE…`) | empty |
-| Gateway | `adyk_test_…` / `adyk_live_…` | `https://adyen-gateway.apaleo.com` |
+| Managed | `merchantAccount` only | authorizes that legacy merchant account and forwards it |
+| Balance | `store` only | authorizes the store, then injects the regional `merchantAccount` |
 
-Do not put a path on the origin (`/api/checkout` is not a Checkout path). Drop-in still needs `ADYEN_CLIENT_KEY`.
-
-- **Managed / legacy credential:** set `ADYEN_MERCHANT_ACCOUNT`, leave `ADYEN_STORE` empty.
-- **Balance Platform credential:** set `ADYEN_STORE` to the assigned store code.
+So each mode needs its own gateway credential (and its own Drop-in `clientKey`). Switching the mode in the UI selects that credential and body shape for the next payment. A 3DS redirect keeps the account and mode of the original payment.
 
 ---
 
 ## Deploy on Render
 
-New Web Service from this repo:
+One Web Service from this repo serves every account:
 
 - Root directory: empty (not `backend/`)
 - Build: `npm install --prefix backend`
 - Start: `npm start --prefix backend`
 - Health check: `/api/health`
 - Region: Frankfurt
+- Env: `ACCOUNTS_JSON` as a secret env var holding the JSON above. Once it is set, the flat `APALEO_*` / `ADYEN_*` variables are unused and can be removed (including `ADYEN_GATEWAY_API_KEY`, `ADYEN_GATEWAY_BASE_URL`, `ADYEN_CHECKOUT_MODE` from the earlier dual-client setup).
 
-After the first `https://<service>.onrender.com` URL exists, add that origin to the Adyen client key Allowed Origins list.
-
-To use the gateway on Render: `ADYEN_API_KEY=adyk_test_…` and `ADYEN_CHECKOUT_ORIGIN=https://adyen-gateway.apaleo.com`. Remove `ADYEN_GATEWAY_API_KEY`, `ADYEN_GATEWAY_BASE_URL`, and `ADYEN_CHECKOUT_MODE` if they are still set from the earlier dual-client setup.
+After the first `https://<service>.onrender.com` URL exists, add that origin to the Allowed Origins list of every Drop-in `clientKey` used in `ACCOUNTS_JSON` (each mode and each staging key).
 
 ---
-
 ## Project structure
 
 ```text
 backend/
+  accounts.js
   adyen.js
   apaleo.js
   index.js

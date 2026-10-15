@@ -13,21 +13,7 @@
   -->
   <link rel="stylesheet" href="style.css" />
 
-  <!--
-    Adyen Web SDK (Drop-in)
-
-    This library renders the secure payment form in the browser.
-    Card details never pass through our frontend or backend directly.
-  -->
-  <link
-    rel="stylesheet"
-    href="https://checkoutshopper-test.adyen.com/checkoutshopper/sdk/6.17.0/adyen.css"
-  />
-
-  <script
-    src="https://checkoutshopper-test.adyen.com/checkoutshopper/sdk/6.17.0/adyen.js"
-    crossorigin="anonymous"
-  ></script>
+  <!-- Adyen Web SDK (Drop-in) is loaded on demand by script.js, so a LIVE account can use checkoutshopper-live. -->
 </head>
 
 <body>
@@ -51,6 +37,27 @@
       GET /booking/v1/offers
     -->
     <section class="card">
+
+      <h2>Account and payment mode</h2>
+
+      <div id="account-controls">
+        <label>
+          Account
+          <select id="account-select">
+            <option value="">Loading accounts...</option>
+          </select>
+        </label>
+
+        <label>
+          Payment mode
+          <select id="mode-select" disabled>
+            <option value="managed">Managed</option>
+            <option value="balance">Balance</option>
+          </select>
+        </label>
+
+        <p id="gateway-label"></p>
+      </div>
 
       <h2>Search offers</h2>
 

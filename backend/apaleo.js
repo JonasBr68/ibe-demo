@@ -12,11 +12,11 @@ const DEFAULT_CHANNEL_CODE = 'Ibe';
  * - backend gets a token
  * - backend calls apaleo APIs
  */
-async function getAccessToken() {
+async function getAccessToken(account) {
   const params = new URLSearchParams();
   params.append('grant_type', 'client_credentials');
-  params.append('client_id', process.env.APALEO_CLIENT_ID);
-  params.append('client_secret', process.env.APALEO_CLIENT_SECRET);
+  params.append('client_id', account.apaleo.clientId);
+  params.append('client_secret', account.apaleo.clientSecret);
 
   const response = await axios.post(IDENTITY_URL, params, {
     headers: {
@@ -32,8 +32,8 @@ async function getAccessToken() {
  *
  * It keeps the public functions below a bit easier to read.
  */
-async function getAuthHeaders() {
-  const accessToken = await getAccessToken();
+async function getAuthHeaders(account) {
+  const accessToken = await getAccessToken(account);
 
   return {
     Authorization: `Bearer ${accessToken}`,
@@ -45,8 +45,8 @@ async function getAuthHeaders() {
  *
  * The frontend uses this to populate the property selector dynamically.
  */
-async function getProperties() {
-  const headers = await getAuthHeaders();
+async function getProperties(account) {
+  const headers = await getAuthHeaders(account);
 
   const response = await axios.get(`${API_BASE_URL}/inventory/v1/properties`, {
     headers,
@@ -61,8 +61,8 @@ async function getProperties() {
  * This is the first real booking step of the IBE flow:
  * property -> stay dates -> guests -> offers
  */
-async function searchOffers({ propertyId, arrival, departure, adults }) {
-    const headers = await getAuthHeaders();
+async function searchOffers({ account, propertyId, arrival, departure, adults }) {
+    const headers = await getAuthHeaders(account);
   
     const response = await axios.get(`${API_BASE_URL}/booking/v1/offers`, {
       headers,
@@ -167,10 +167,11 @@ function extractFirstReservationId(booking) {
  * Creates paymentAccount on a reservation with PSP reference as a transactionReference.
  */
 async function createPaymentAccountByAuthorization({
+  account,
   reservationId,
   pspReference,
 }) {
-  const headers = await getAuthHeaders();
+  const headers = await getAuthHeaders(account);
 
   const payload = {
     target: {
@@ -203,8 +204,8 @@ async function createPaymentAccountByAuthorization({
  * The selected offer is transformed into a booking payload,
  * then posted to Booking API.
  */
-async function createBooking({ offer, searchCriteria, guest, pspReference }) {
-  const headers = await getAuthHeaders();
+async function createBooking({ account, offer, searchCriteria, guest, pspReference }) {
+  const headers = await getAuthHeaders(account);
 
   const payload = buildBookingPayload({
     offer,
@@ -231,12 +232,14 @@ async function createBooking({ offer, searchCriteria, guest, pspReference }) {
 }
 
 async function createBookingWithPaymentAccount({
+  account,
   offer,
   searchCriteria,
   guest,
   pspReference,
 }) {
   const bookingResult = await createBooking({
+    account,
     offer,
     searchCriteria,
     guest,
@@ -250,6 +253,7 @@ async function createBookingWithPaymentAccount({
   }
 
   const paymentAccountResult = await createPaymentAccountByAuthorization({
+    account,
     reservationId,
     pspReference,
   });
